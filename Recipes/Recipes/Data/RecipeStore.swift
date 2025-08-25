@@ -1,41 +1,67 @@
 import UIKit
 
 final class RecipeStore {
+    
     static let shared = RecipeStore()
     
-    private init() {
+    private enum Constants {
+        static let recipeTypesJSON = "recipetypes"
+        static let savedRecipesKey = "savedRecipes"
+        static let imagePrefix = "img_"
+        static let imageExtension = ".jpg"
+        static let imageCompression: CGFloat = 0.9
+        static let imageSize = CGSize(width: 44, height: 44)
+    }
+    
+    private(set) var recipeTypes: [RecipeType] = []
+    private(set) var recipes: [Recipe] = []
+    
+    private let fileManager: FileManager
+    private let userDefaults: UserDefaults
+    private let documentsDirectory: URL
+    
+    private init(
+        fileManager: FileManager = .default,
+        userDefaults: UserDefaults = .standard
+    ) {
+        self.fileManager = fileManager
+        self.userDefaults = userDefaults
+        self.documentsDirectory = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        
         loadRecipeTypes()
         loadRecipes()
     }
     
-    // MARK: - Public state
-    private(set) var recipeTypes: [RecipeType] = []
-    private(set) var recipes: [Recipe] = []
-    
-    // MARK: - Loaders
+    //data loading
     private func loadRecipeTypes() {
-        guard let url = Bundle.main.url(forResource: "recipetypes", withExtension: "json") else {
-            assertionFailure("recipetypes.json missing from bundle")
+        guard let url = Bundle.main.url(forResource: Constants.recipeTypesJSON, withExtension: "json") else {
+            assertionFailure("\(Constants.recipeTypesJSON).json missing from bundle")
             return
         }
+        
         do {
             let data = try Data(contentsOf: url)
             recipeTypes = try JSONDecoder().decode([RecipeType].self, from: data)
         } catch {
-            print("Failed to read recipetypes.json: \(error)")
+            print("Failed to load recipe types: \(error.localizedDescription)")
         }
     }
     
     private func loadRecipes() {
-        // Load from UserDefaults or use sample data if none exists
-        if let savedRecipesData = UserDefaults.standard.data(forKey: "savedRecipes"),
-           let savedRecipes = try? JSONDecoder().decode([Recipe].self, from: savedRecipesData) {
-            recipes = savedRecipes
-        } else {
+        guard let savedRecipesData = userDefaults.data(forKey: Constants.savedRecipesKey) else {
+            seedSampleData()
+            return
+        }
+        
+        do {
+            recipes = try JSONDecoder().decode([Recipe].self, from: savedRecipesData)
+        } catch {
+            print("Failed to decode saved recipes: \(error.localizedDescription)")
             seedSampleData()
         }
     }
     
+    //sample data - dummy data
     private func seedSampleData() {
         let sampleRecipes = [
             Recipe(
@@ -66,70 +92,103 @@ final class RecipeStore {
     }
     
     private func saveRecipes() {
-        if let encoded = try? JSONEncoder().encode(recipes) {
-            UserDefaults.standard.set(encoded, forKey: "savedRecipes")
+        do {
+            let encoded = try JSONEncoder().encode(recipes)
+            userDefaults.set(encoded, forKey: Constants.savedRecipesKey)
+        } catch {
+            print("Failed to save recipes: \(error.localizedDescription)")
         }
     }
     
-    // MARK: - CRUD Operations
+    //crud
     func add(_ recipe: Recipe) {
         recipes.insert(recipe, at: 0)
         saveRecipes()
     }
     
     func update(_ recipe: Recipe) {
-        if let index = recipes.firstIndex(where: { $0.id == recipe.id }) {
-            recipes[index] = recipe
-            saveRecipes()
+        guard let index = recipes.firstIndex(where: { $0.id == recipe.id }) else {
+            print("Recipe not found for update")
+            return
         }
+        
+        recipes[index] = recipe
+        saveRecipes()
     }
     
     func delete(id: UUID) {
-        if let index = recipes.firstIndex(where: { $0.id == id }) {
-            // remove image file if exists
-            if let filename = recipes[index].imageFilename {
-                let path = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(filename)
-                try? FileManager.default.removeItem(at: path)
-            }
-            recipes.remove(at: index)
-            saveRecipes()
+        guard let index = recipes.firstIndex(where: { $0.id == id }) else {
+            print("Recipe not found for deletion")
+            return
         }
+        
+        let recipe = recipes[index]
+        removeImageIfNeeded(for: recipe)
+        recipes.remove(at: index)
+        saveRecipes()
     }
     
-    // MARK: - Images
+    //img manage
     func saveImage(_ image: UIImage) -> String? {
-        let name = "img_\(UUID().uuidString).jpg"
-        let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(name)
-        guard let data = image.jpegData(compressionQuality: 0.9) else { return nil }
+        let filename = Constants.imagePrefix + UUID().uuidString + Constants.imageExtension
+        let fileURL = documentsDirectory.appendingPathComponent(filename)
+        
+        guard let imageData = image.jpegData(compressionQuality: Constants.imageCompression) else {
+            print("Failed to compress image")
+            return nil
+        }
+        
         do {
-            try data.write(to: url, options: .atomic)
-            return name
+            try imageData.write(to: fileURL, options: .atomic)
+            return filename
         } catch {
-            print("Save image failed: \(error)")
+            print("Failed to save image: \(error.localizedDescription)")
             return nil
         }
     }
     
     func image(for filename: String?) -> UIImage? {
-        guard let filename = filename else { return nil }
+        guard let filename = filename, !filename.isEmpty else { return nil }
         
-        // First try to load from Assets.xcassets (for sample data)
         if let assetImage = UIImage(named: filename) {
             return assetImage
         }
         
-        // Then try to load from Documents directory (for user-added images)
-        let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(filename)
-        return UIImage(contentsOfFile: url.path)
+        let fileURL = documentsDirectory.appendingPathComponent(filename)
+        return UIImage(contentsOfFile: fileURL.path)
     }
     
-    // Helpers
+    private func removeImageIfNeeded(for recipe: Recipe) {
+        guard let filename = recipe.imageFilename else { return }
+        
+        let fileURL = documentsDirectory.appendingPathComponent(filename)
+        do {
+            if fileManager.fileExists(atPath: fileURL.path) {
+                try fileManager.removeItem(at: fileURL)
+            }
+        } catch {
+            print("Failed to remove image file: \(error.localizedDescription)")
+        }
+    }
+    
     func typeName(for id: Int) -> String {
-        recipeTypes.first(where: { $0.id == id })?.name ?? "Unknown"
+        recipeTypes.first { $0.id == id }?.name ?? "Unknown Type"
     }
     
     func getRecipesByType(_ typeId: Int?) -> [Recipe] {
         guard let typeId = typeId else { return recipes }
         return recipes.filter { $0.typeId == typeId }
+    }
+    
+    func recipe(with id: UUID) -> Recipe? {
+        recipes.first { $0.id == id }
+    }
+    
+    var recipesCount: Int {
+        recipes.count
+    }
+    
+    var availableTypes: [RecipeType] {
+        recipeTypes
     }
 }
